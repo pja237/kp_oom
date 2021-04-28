@@ -7,6 +7,7 @@
 
 #define KALLSYM "try_to_free_mem_cgroup_pages"
 #define SLURM "slurmstepd"
+#define SINGULARITY "starter-suid"
 
 MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
@@ -16,6 +17,7 @@ static struct kprobe kp;
 
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
+    int count_sing = 0;
     struct task_struct *tmp_ts;
     const struct cred *cred = current_cred();
     // --------------------------------------------------------------------------------
@@ -37,11 +39,16 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     tmp_ts=current;
     while(tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
         pr_debug("WALK UP tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+        if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
+            count_sing++;
+        }
         tmp_ts=tmp_ts->parent;
     }
-    pr_debug("WALK TOP pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-    if(tmp_ts->pid == 1) {
+    pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
+    if(tmp_ts->pid == 1 || count_sing == 0) {
         // we have walked all the way up to the top, so we didn't come from slurm => abort!
+        // OR we haven't encountered singularity starter-suid above us, also abort!
+        pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
         return 0;
     }
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
