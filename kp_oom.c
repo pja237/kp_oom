@@ -61,8 +61,16 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     pr_debug("tmp_ts->parent pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
     // ok, we're here, lets try to send an event
     rcu_read_lock();
-    // slurm efd = 17 ?always? or implement some detection logic (vomit)
+    // slurm efd = 12 for .batch and .extern (those don't have fd up to 17)
+    //           = 17 for .0
     efd_file = fcheck_files(tmp_ts->parent->files, 17);
+    if(efd_file == NULL) {
+        pr_debug("edf fd 17 failed, we're in .batch or .extern, trying for 12\n");
+        efd_file = fcheck_files(tmp_ts->parent->files, 12);
+        if(efd_file != NULL) {
+            pr_debug("edf fd 12 success!\n");
+        }
+    }
     rcu_read_unlock();
     efd_ctx = eventfd_ctx_fileget(efd_file);
     if (!efd_ctx) {
