@@ -74,6 +74,10 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         if(efd_file != NULL) {
             pr_debug("edf fd 12 success!\n");
         }
+        else {
+            pr_alert("Could not find eventfd file, aborting!\n");
+            return 0;
+        }
     }
     rcu_read_unlock();
     efd_ctx = eventfd_ctx_fileget(efd_file);
