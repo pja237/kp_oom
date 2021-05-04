@@ -4,6 +4,12 @@
 #include <linux/fdtable.h>
 #include <linux/rcupdate.h>
 #include <linux/eventfd.h>
+#include <linux/cgroup.h>
+#include <linux/res_counter.h>
+#include <linux/vmpressure.h>
+#include <linux/memcontrol.h>
+#include <linux/page_counter.h>
+#include "kp_oom.h"
 
 #define KALLSYM "try_to_free_mem_cgroup_pages"
 #define SLURM "slurmstepd"
@@ -20,6 +26,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     int count_sing = 0;
     struct task_struct *tmp_ts;
     const struct cred *cred = current_cred();
+    struct mm_struct *mm; 
     // --------------------------------------------------------------------------------
     // eventfd vars
     // --------------------------------------------------------------------------------
@@ -27,13 +34,36 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     struct eventfd_ctx * efd_ctx = NULL;        //...and finally to eventfd context
     uint64_t plus_one = 1;
     // --------------------------------------------------------------------------------
+    struct cgroup *cg;
+    struct mem_cgroup *memcg;
 
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
-    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
         pr_debug(" Exiting slurmstepd, ignore.\n");
         return 0;
     }
+    // else do work...
+    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+    //dump_stack();
+    mm=get_task_mm(current);
+    pr_alert("--------------------------------------------------------------------------------\n");
+    pr_alert("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
+    pr_alert("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
+    pr_alert("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
+    pr_alert("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
+    cg=task_cgroup(current, mem_cgroup_subsys_id);
+    memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
+    pr_alert("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
+    pr_alert("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
+    pr_alert("--------------------------------------------------------------------------------\n");
+    //return 0;
+    // 51200 pages == 200 MB
+    // if more then that is taken by the PC, don't kill anything, resume operations...
+    if(memcg->memory.parent->limit-get_mm_rss(mm)>51200) {
+        pr_alert("Still not under too much pressure, resuming...\n");
+        return 0;
+    }
+    pr_debug("Under 200MB pagecache left in memcg abort!\n");
 
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
     tmp_ts=current;
@@ -106,6 +136,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
     pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s job=%s uid=%d\n", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val);
     send_sig(9, tmp_ts, 0);
+    //send_sig(9, current, 0);
     pr_alert("...call finished\n");
     return 0;
 }
