@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kprobes.h>
 #include <linux/fdtable.h>
 #include <linux/rcupdate.h>
@@ -19,11 +20,15 @@ MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
 MODULE_LICENSE("GPL");
 
+static int bail_mark_percent=10;
+module_param(bail_mark_percent, int, 0660);
+
 static struct kprobe kp;
 
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
     int count_sing = 0;
+    long int pc_pages;
     struct task_struct *tmp_ts;
     const struct cred *cred = current_cred();
     struct mm_struct *mm; 
@@ -46,24 +51,30 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
     //dump_stack();
     mm=get_task_mm(current);
-    pr_alert("--------------------------------------------------------------------------------\n");
-    pr_alert("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
-    pr_alert("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
-    pr_alert("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
-    pr_alert("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
+    pr_debug("--------------------------------------------------------------------------------\n");
+    pr_debug("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
+    pr_debug("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
+    pr_debug("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
+    pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
     cg=task_cgroup(current, mem_cgroup_subsys_id);
     memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
-    pr_alert("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
-    pr_alert("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
-    pr_alert("--------------------------------------------------------------------------------\n");
+    pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
+    pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
+    pr_debug("--------------------------------------------------------------------------------\n");
     //return 0;
     // 51200 pages == 200 MB
     // if more then that is taken by the PC, don't kill anything, resume operations...
-    if(memcg->memory.parent->limit-get_mm_rss(mm)>51200) {
-        pr_alert("Still not under too much pressure, resuming...\n");
+    pc_pages=100*get_mm_rss(mm)/memcg->memory.parent->limit;
+    pr_debug("pc_pages = %ld\n", pc_pages);
+    if(pc_pages < 100-bail_mark_percent) {
+        pr_debug("Still not under too much pressure, resuming...\n");
         return 0;
     }
-    pr_debug("Under 200MB pagecache left in memcg abort!\n");
+//    if(memcg->memory.parent->limit-get_mm_rss(mm)>51200) {
+//        pr_debug("Still not under too much pressure, resuming...\n");
+//        return 0;
+//    }
+    pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
 
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
     tmp_ts=current;
@@ -159,6 +170,7 @@ int dummy_init(void)
 
         pr_alert("kp_oom init\n");
         pr_alert("kp_oom init of kprobe\n");
+        pr_alert("kp_oom bail_mark_percent=%d\n", bail_mark_percent);
         kp.pre_handler=kp_pre;
         kp.post_handler=kp_post;
         kp.fault_handler=kp_fault;
