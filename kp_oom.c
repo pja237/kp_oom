@@ -10,6 +10,7 @@
 #include <linux/vmpressure.h>
 #include <linux/memcontrol.h>
 #include <linux/page_counter.h>
+#include <linux/cpu.h>
 #include "kp_oom.h"
 
 #define KALLSYM "try_to_free_mem_cgroup_pages"
@@ -24,6 +25,25 @@ static int bail_mark_percent=10;
 module_param(bail_mark_percent, int, 0660);
 
 static struct kprobe kp;
+
+static long mem_cgroup_read_stat(struct mem_cgroup *memcg,
+				 enum mem_cgroup_stat_index idx)
+{
+	long val = 0;
+	int cpu;
+
+	get_online_cpus();
+	for_each_online_cpu(cpu)
+		val += per_cpu(memcg->stat->count[idx], cpu);
+#ifdef CONFIG_HOTPLUG_CPU
+	spin_lock(&memcg->pcp_counter_lock);
+	val += memcg->nocpu_base.count[idx];
+	spin_unlock(&memcg->pcp_counter_lock);
+#endif
+	put_online_cpus();
+	return val;
+}
+
 
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
@@ -47,6 +67,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         pr_debug(" Exiting slurmstepd, ignore.\n");
         return 0;
     }
+
     // else do work...
     pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
     //dump_stack();
@@ -58,6 +79,8 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
     cg=task_cgroup(current, mem_cgroup_subsys_id);
     memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
+    pr_alert("KP: MEM_CGROUP_STAT_CACHE = %ld ", mem_cgroup_read_stat(memcg, MEM_CGROUP_STAT_CACHE));
+    pr_alert("KP: MEM_CGROUP_STAT_RSS = %ld ", mem_cgroup_read_stat(memcg, MEM_CGROUP_STAT_RSS));
     pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
     pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
     pr_debug("--------------------------------------------------------------------------------\n");
