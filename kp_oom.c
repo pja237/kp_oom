@@ -25,6 +25,23 @@ module_param(bail_mark_percent, int, 0660);
 
 static struct kprobe kp;
 
+unsigned long DFS(struct task_struct *task)
+{   
+    struct task_struct *child;
+    struct list_head *list;
+    struct mm_struct *mm; 
+    unsigned long rss=0;
+
+    mm=get_task_mm(current);
+    rss=get_mm_rss(mm);
+    pr_debug("DFS: pid(%d) rss = %lu\n", current->pid, rss);
+    list_for_each(list, &task->children) {
+        child = list_entry(list, struct task_struct, sibling);
+        rss+=DFS(child);
+    }
+    return rss;
+}
+
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
     int count_sing = 0;
@@ -41,42 +58,31 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // --------------------------------------------------------------------------------
     struct cgroup *cg;
     struct mem_cgroup *memcg;
+    unsigned long total_rss=0;
 
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
         pr_debug(" Exiting slurmstepd, ignore.\n");
         return 0;
     }
+
     // else do work...
-    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
     //dump_stack();
     mm=get_task_mm(current);
+    cg=task_cgroup(current, mem_cgroup_subsys_id);
+    memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
+
     pr_debug("--------------------------------------------------------------------------------\n");
     pr_debug("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
     pr_debug("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
     pr_debug("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
     pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
-    cg=task_cgroup(current, mem_cgroup_subsys_id);
-    memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
     pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
     pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
     pr_debug("--------------------------------------------------------------------------------\n");
-    //return 0;
-    // 51200 pages == 200 MB
-    // if more then that is taken by the PC, don't kill anything, resume operations...
-    pc_pages=100*get_mm_rss(mm)/memcg->memory.parent->limit;
-    pr_debug("pc_pages = %ld\n", pc_pages);
-    if(pc_pages < 100-bail_mark_percent) {
-        pr_debug("Still not under too much pressure, resuming...\n");
-        return 0;
-    }
-//    if(memcg->memory.parent->limit-get_mm_rss(mm)>51200) {
-//        pr_debug("Still not under too much pressure, resuming...\n");
-//        return 0;
-//    }
-    pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
 
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
+    rcu_read_lock();
     tmp_ts=current;
     while(tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
         pr_debug("WALK UP tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
@@ -96,9 +102,27 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
         return 0;
     }
+    rcu_read_unlock();
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
     // ...we could try to terminate that one
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
+
+    // Here we sum up the memcg total_rss to compare it to threshold
+    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+    rcu_read_lock();
+    total_rss=DFS(tmp_ts->parent);
+    rcu_read_unlock();
+    pr_alert("DFS-RESULT: total_rss = %lu\n", total_rss);
+
+    // if more then that is taken by the PC, don't kill anything, resume operations...
+    pc_pages=100*total_rss/memcg->memory.parent->limit;
+    pr_debug("pc_pages = %ld\n", pc_pages);
+    if(pc_pages < 100-bail_mark_percent) {
+        pr_debug("Still not under too much pressure, resuming...\n");
+        return 0;
+    }
+
+    pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
 
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
