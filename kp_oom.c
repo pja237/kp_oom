@@ -25,17 +25,18 @@ module_param(bail_mark_percent, int, 0660);
 
 static struct kprobe kp;
 
+// this is a sshow, how to protect this traversal?!
 unsigned long DFS(struct task_struct *task)
 {   
     struct task_struct *child;
-    struct list_head *list;
+    struct list_head *list, *n;
     struct mm_struct *mm; 
     unsigned long rss=0;
 
-    mm=get_task_mm(current);
+    mm=get_task_mm(task);
     rss=get_mm_rss(mm);
-    pr_debug("DFS: pid(%d) rss = %lu\n", current->pid, rss);
-    list_for_each(list, &task->children) {
+    pr_debug("DFS: pid(%d) rss = %lu\n", task->pid, rss);
+    list_for_each_safe(list, n, &task->children) {
         child = list_entry(list, struct task_struct, sibling);
         rss+=DFS(child);
     }
@@ -60,6 +61,8 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     struct mem_cgroup *memcg;
     unsigned long total_rss=0;
 
+    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
         pr_debug(" Exiting slurmstepd, ignore.\n");
@@ -81,9 +84,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
     pr_debug("--------------------------------------------------------------------------------\n");
 
+    pr_debug("DANGERZONE!!!\n");
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
-    rcu_read_lock();
     tmp_ts=current;
+    if(tmp_ts->parent==NULL) {
+        pr_alert("parent killed!!!\n");
+        return 0;
+    }
     while(tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
         pr_debug("WALK UP tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
         pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
@@ -91,6 +98,10 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
             count_sing++;
         }
         tmp_ts=tmp_ts->parent;
+        if(tmp_ts->parent==NULL) {
+            pr_alert("parent killed!!!\n");
+            return 0;
+        }
     }
     if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
         count_sing++;
@@ -102,17 +113,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
         return 0;
     }
-    rcu_read_unlock();
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
     // ...we could try to terminate that one
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
 
     // Here we sum up the memcg total_rss to compare it to threshold
-    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
-    rcu_read_lock();
     total_rss=DFS(tmp_ts->parent);
-    rcu_read_unlock();
-    pr_alert("DFS-RESULT: total_rss = %lu\n", total_rss);
+    pr_debug("DFS-RESULT: total_rss = %lu\n", total_rss);
 
     // if more then that is taken by the PC, don't kill anything, resume operations...
     pc_pages=100*total_rss/memcg->memory.parent->limit;
@@ -170,8 +177,10 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     //
     // pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
     pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s job=%s uid=%d\n", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val);
-    send_sig(9, tmp_ts, 0);
+    //send_sig(9, tmp_ts, 0);
     //send_sig(9, current, 0);
+    //kill_pid(find_vpid(tmp_ts->pid), 9, 0);
+    kill_pid(find_vpid(tmp_ts->pid), 9, 0);
     pr_alert("...call finished\n");
     return 0;
 }
