@@ -46,31 +46,28 @@ unsigned long DFS(struct task_struct *task)
     unsigned long rss=0;
 
     //pr_debug("DFS: pid(%d) state = %ld\n", task->pid, task->state);
-    //if(task->state!=1) return rss;
-    pr_alert("DFS-in: CURRENT(%d) pid(%d) comm=%s flags= %u state= %ld\n", current->pid, task->pid, task->comm, task->flags, task->state);
-    //mdelay(1000);
+    //pr_alert("DFS-in: CURRENT(%d) pid(%d) comm=%s flags= %u state= %ld\n", current->pid, task->pid, task->comm, task->flags, task->state);
     mm=get_task_mm(task);
     rss=get_mm_rss(mm);
     pr_debug("DFS: pid(%d) rss = %lu\n", task->pid, rss);
 // no. fvcks with leafs, move to main() before the DFS() call
-    if(list_empty(&task->children) && strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
-        pr_alert("DFS: CURRENT(%d) empty children list, return 0", current->pid);
-        return 0;
-    }
+//    if(list_empty(&task->children) && strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
+//        pr_alert("DFS: CURRENT(%d) empty children list, return 0", current->pid);
+//        return 0;
+//    }
     list_for_each_safe(list, n, &task->children) {
         child = list_entry(list, struct task_struct, sibling);
-        pr_alert("DFS-down: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
-	//mdelay(1000);
+        //pr_alert("DFS-down: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
 	if(pid_alive(child)) {
-            pr_alert("DFS-down ALIVE: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
+            //pr_alert("DFS-down ALIVE: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
             rss+=DFS(child);
 	}
 	else {
-            pr_alert("DFS-down DEAD: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
+            //pr_alert("DFS-down DEAD: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
 	    return 0;
 	}
     }
-    pr_alert("DFS-up: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld rss=%lu\n", current->pid, task->pid, task->comm, task->flags, task->state, rss);
+    //pr_alert("DFS-up: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld rss=%lu\n", current->pid, task->pid, task->comm, task->flags, task->state, rss);
     return rss;
 }
 
@@ -92,7 +89,6 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     struct mem_cgroup *memcg;
     unsigned long total_rss=0;
 
-    //if(current==NULL) return 0;
     pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
 
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
@@ -107,14 +103,14 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     cg=task_cgroup(current, mem_cgroup_subsys_id);
     memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
 
-    pr_debug("--------------------------------------------------------------------------------\n");
-    pr_debug("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
-    pr_debug("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
-    pr_debug("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
-    pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
-    pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
-    pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
-    pr_debug("--------------------------------------------------------------------------------\n");
+//    pr_debug("--------------------------------------------------------------------------------\n");
+//    pr_debug("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
+//    pr_debug("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
+//    pr_debug("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
+//    pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
+//    pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
+//    pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
+//    pr_debug("--------------------------------------------------------------------------------\n");
 
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
     tmp_ts=current;
@@ -128,17 +124,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
             count_sing++;
         }
-        if(tmp_ts->parent==NULL) {
-            pr_alert("parent killed!!!\n");
-            return 0;
-        }
         tmp_ts=tmp_ts->parent;
     }
     if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
         count_sing++;
     }
     pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
-    if(tmp_ts->pid == 1 || count_sing == 0) {
+    if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0) {
         // we have walked all the way up to the top, so we didn't come from slurm => abort!
         // OR we haven't encountered singularity starter-suid above us, also abort!
         pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
@@ -149,39 +141,39 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
 
     // Here we sum up the memcg total_rss to compare it to threshold
-    pr_alert("pre-DFS: CURRENT(%d) flags= %u state= %ld\n", current->pid, tmp_ts->flags, tmp_ts->state);
-    if(!tmp_ts) {
-	pr_alert("ABORT!\n");
-	return 0;
-    }
-    if(list_empty(&tmp_ts->parent->children)) {
-        pr_alert("pre-DFS: CURRENT(%d) tmp_ts->parent->children empty children list, return 0", current->pid);
-        return 0;
-    }
+    //pr_alert("pre-DFS: CURRENT(%d) flags= %u state= %ld\n", current->pid, tmp_ts->flags, tmp_ts->state);
+//    if(!tmp_ts) {
+//	pr_alert("ABORT!\n");
+//	return 0;
+//    }
+//    if(list_empty(&tmp_ts->parent->children)) {
+//        pr_alert("pre-DFS: CURRENT(%d) tmp_ts->parent->children empty children list, return 0", current->pid);
+//        return 0;
+//    }
     if(down_trylock(&sem)==0) {
-        pr_alert("pre-DFS: got the semaphore, entering DFS()\n");
+        //pr_alert("pre-DFS: got the semaphore, entering DFS()\n");
         total_rss=DFS(tmp_ts->parent);
     }
     else {
-        pr_alert("pre-DFS: failed to get the semaphore, aborting\n");
+        //pr_alert("pre-DFS: failed to get the semaphore, aborting\n");
 	return 0;
     }
-    if(total_rss==0) {
-	pr_alert("total_rss==0!!! ABORT\n");
-	return 0;
-    }
-    pr_alert("DFS-RESULT: CURRENT(%d) total_rss = %lu\n", current->pid, total_rss);
+//    if(total_rss==0) {
+//	pr_alert("total_rss==0!!! ABORT\n");
+//	return 0;
+//    }
+    //pr_alert("DFS-RESULT: CURRENT(%d) total_rss = %lu\n", current->pid, total_rss);
 
     // if more then that is taken by the PC, don't kill anything, resume operations...
     pc_pages=100*total_rss/memcg->memory.parent->limit;
     pr_debug("pc_pages = %ld\n", pc_pages);
     if(pc_pages < 100-bail_mark_percent) {
-        pr_alert("Still not under too much pressure, resuming...\n");
+        //pr_alert("Still not under too much pressure, resuming...\n");
         up(&sem);
         return 0;
     }
 
-    pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
+    //pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
 
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
@@ -236,13 +228,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     kill_pid(find_vpid(tmp_ts->pid), 9, 0);
     //kill_pid(find_vpid(current->pid), 9, 0);
     pr_alert("post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
-    mdelay(2000);
+    //mdelay(2000);
     // arm timer and release the lock there
     init_timer(&sem_timer);
     // now + 20k miliseconds
     sem_timer.data=0;
     sem_timer.function=timer_function_up_semaphore;
-    sem_timer.expires=jiffies+msecs_to_jiffies(20000);
+    sem_timer.expires=jiffies+msecs_to_jiffies(10000);
     add_timer(&sem_timer);
     //setup_timer(sem_timer, timer_function_up_semaphore, 100);
     //up(&sem);
