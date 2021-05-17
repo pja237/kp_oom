@@ -11,6 +11,7 @@
 #include <linux/memcontrol.h>
 #include <linux/page_counter.h>
 #include <linux/delay.h>
+#include <linux/timer.h>
 #include "kp_oom.h"
 
 #define KALLSYM "try_to_free_mem_cgroup_pages"
@@ -25,8 +26,18 @@ static int bail_mark_percent=10;
 module_param(bail_mark_percent, int, 0660);
 
 static struct kprobe kp;
+static struct semaphore sem;
+static struct timer_list sem_timer;
+
+void timer_function_up_semaphore(unsigned long data)
+{
+    pr_alert("timer: semaphore up!\n");
+    up(&sem);
+    return; 
+}
 
 // this is a sshow, how to protect this traversal?!
+// semaphore...
 unsigned long DFS(struct task_struct *task)
 {   
     struct task_struct *child;
@@ -37,7 +48,7 @@ unsigned long DFS(struct task_struct *task)
     //pr_debug("DFS: pid(%d) state = %ld\n", task->pid, task->state);
     //if(task->state!=1) return rss;
     pr_alert("DFS-in: CURRENT(%d) pid(%d) comm=%s flags= %u state= %ld\n", current->pid, task->pid, task->comm, task->flags, task->state);
-    mdelay(1000);
+    //mdelay(1000);
     mm=get_task_mm(task);
     rss=get_mm_rss(mm);
     pr_debug("DFS: pid(%d) rss = %lu\n", task->pid, rss);
@@ -49,8 +60,15 @@ unsigned long DFS(struct task_struct *task)
     list_for_each_safe(list, n, &task->children) {
         child = list_entry(list, struct task_struct, sibling);
         pr_alert("DFS-down: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
-	mdelay(1000);
-        rss+=DFS(child);
+	//mdelay(1000);
+	if(pid_alive(child)) {
+            pr_alert("DFS-down ALIVE: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
+            rss+=DFS(child);
+	}
+	else {
+            pr_alert("DFS-down DEAD: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
+	    return 0;
+	}
     }
     pr_alert("DFS-up: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld rss=%lu\n", current->pid, task->pid, task->comm, task->flags, task->state, rss);
     return rss;
@@ -140,18 +158,26 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         pr_alert("pre-DFS: CURRENT(%d) tmp_ts->parent->children empty children list, return 0", current->pid);
         return 0;
     }
-    total_rss=DFS(tmp_ts->parent);
+    if(down_trylock(&sem)==0) {
+        pr_alert("pre-DFS: got the semaphore, entering DFS()\n");
+        total_rss=DFS(tmp_ts->parent);
+    }
+    else {
+        pr_alert("pre-DFS: failed to get the semaphore, aborting\n");
+	return 0;
+    }
     if(total_rss==0) {
 	pr_alert("total_rss==0!!! ABORT\n");
 	return 0;
     }
-    pr_debug("DFS-RESULT: CURRENT(%d) total_rss = %lu\n", current->pid, total_rss);
+    pr_alert("DFS-RESULT: CURRENT(%d) total_rss = %lu\n", current->pid, total_rss);
 
     // if more then that is taken by the PC, don't kill anything, resume operations...
     pc_pages=100*total_rss/memcg->memory.parent->limit;
     pr_debug("pc_pages = %ld\n", pc_pages);
     if(pc_pages < 100-bail_mark_percent) {
-        pr_debug("Still not under too much pressure, resuming...\n");
+        pr_alert("Still not under too much pressure, resuming...\n");
+        up(&sem);
         return 0;
     }
 
@@ -208,8 +234,18 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     //kill_pid(find_vpid(tmp_ts->pid), 9, 0);
     rcu_read_lock();
     kill_pid(find_vpid(tmp_ts->pid), 9, 0);
-    pr_alert("post-kill_pid: flags= %u state= %ld\n", tmp_ts->flags, tmp_ts->state);
-    mdelay(1000);
+    //kill_pid(find_vpid(current->pid), 9, 0);
+    pr_alert("post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
+    mdelay(2000);
+    // arm timer and release the lock there
+    init_timer(&sem_timer);
+    // now + 20k miliseconds
+    sem_timer.data=0;
+    sem_timer.function=timer_function_up_semaphore;
+    sem_timer.expires=jiffies+msecs_to_jiffies(20000);
+    add_timer(&sem_timer);
+    //setup_timer(sem_timer, timer_function_up_semaphore, 100);
+    //up(&sem);
     rcu_read_unlock();
     pr_alert("...call finished\n");
     return 0;
@@ -231,6 +267,7 @@ int dummy_init(void)
 {
         unsigned long symbol_address;
 
+	sema_init(&sem, 1);
         pr_alert("kp_oom init\n");
         pr_alert("kp_oom init of kprobe\n");
         pr_alert("kp_oom bail_mark_percent=%d\n", bail_mark_percent);
