@@ -14,7 +14,8 @@
 #include <linux/timer.h>
 #include "kp_oom.h"
 
-#define KALLSYM "try_to_free_mem_cgroup_pages"
+//#define KALLSYM "try_to_free_mem_cgroup_pages"
+#define KALLSYM "mem_cgroup_oom_synchronize"
 #define SLURM "slurmstepd"
 #define SINGULARITY "starter-suid"
 
@@ -22,62 +23,13 @@ MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
 MODULE_LICENSE("GPL");
 
-static int bail_mark_percent=10;
-module_param(bail_mark_percent, int, 0660);
-
 static struct kprobe kp;
-static struct semaphore sem;
-static struct timer_list sem_timer;
-
-void timer_function_up_semaphore(unsigned long data)
-{
-    pr_alert("timer: semaphore up!\n");
-    up(&sem);
-    return; 
-}
-
-// this is a sshow, how to protect this traversal?!
-// semaphore...
-unsigned long DFS(struct task_struct *task)
-{   
-    struct task_struct *child;
-    struct list_head *list, *n;
-    struct mm_struct *mm; 
-    unsigned long rss=0;
-
-    //pr_debug("DFS: pid(%d) state = %ld\n", task->pid, task->state);
-    //pr_alert("DFS-in: CURRENT(%d) pid(%d) comm=%s flags= %u state= %ld\n", current->pid, task->pid, task->comm, task->flags, task->state);
-    mm=get_task_mm(task);
-    rss=get_mm_rss(mm);
-    pr_debug("DFS: pid(%d) rss = %lu\n", task->pid, rss);
-// no. fvcks with leafs, move to main() before the DFS() call
-//    if(list_empty(&task->children) && strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
-//        pr_alert("DFS: CURRENT(%d) empty children list, return 0", current->pid);
-//        return 0;
-//    }
-    list_for_each_safe(list, n, &task->children) {
-        child = list_entry(list, struct task_struct, sibling);
-        //pr_alert("DFS-down: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
-	if(pid_alive(child)) {
-            //pr_alert("DFS-down ALIVE: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
-            rss+=DFS(child);
-	}
-	else {
-            //pr_alert("DFS-down DEAD: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld\n", current->pid, child->pid, child->comm, child->flags, child->state);
-	    return 0;
-	}
-    }
-    //pr_alert("DFS-up: CURRENT(%d) pid(%d) commd=%s flags= %u state= %ld rss=%lu\n", current->pid, task->pid, task->comm, task->flags, task->state, rss);
-    return rss;
-}
 
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
     int count_sing = 0;
-    long int pc_pages;
     struct task_struct *tmp_ts;
     const struct cred *cred = current_cred();
-    struct mm_struct *mm; 
     // --------------------------------------------------------------------------------
     // eventfd vars
     // --------------------------------------------------------------------------------
@@ -85,11 +37,8 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     struct eventfd_ctx * efd_ctx = NULL;        //...and finally to eventfd context
     uint64_t plus_one = 1;
     // --------------------------------------------------------------------------------
-    struct cgroup *cg;
-    struct mem_cgroup *memcg;
-    unsigned long total_rss=0;
 
-    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+    // pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
 
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
@@ -98,20 +47,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     }
 
     // else do work...
-    //dump_stack();
-    mm=get_task_mm(current);
-    cg=task_cgroup(current, mem_cgroup_subsys_id);
-    memcg=(struct mem_cgroup *) cg->subsys[mem_cgroup_subsys_id];
-
-//    pr_debug("--------------------------------------------------------------------------------\n");
-//    pr_debug("mm.rss pid(%d) = %ld !\n", current->pid, get_mm_rss(mm));
-//    pr_debug("mm.total_vm pid(%d) = %ld !\n", current->pid, mm->total_vm);
-//    pr_debug("mm.hiwater_rss pid(%d) = %ld !\n", current->pid, mm->hiwater_rss);
-//    pr_debug("mm.locked_vm pid(%d) = %ld !\n", current->pid, mm->locked_vm);
-//    pr_debug("mem_cgroup pid(%d) memcg * = %p  usage = %lu limit= %lu watermark= %lu failcnt= %lu\n", current->pid, memcg, page_counter_read(&memcg->memory), memcg->memory.parent->limit, memcg->memory.watermark, memcg->memory.failcnt);
-//    pr_debug("mem_cgroup pid(%d) kmem=%lu\n", current->pid, page_counter_read(&memcg->kmem));
-//    pr_debug("--------------------------------------------------------------------------------\n");
-
+    //
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
     tmp_ts=current;
     if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
@@ -139,41 +75,6 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
     // ...we could try to terminate that one
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
-
-    // Here we sum up the memcg total_rss to compare it to threshold
-    //pr_alert("pre-DFS: CURRENT(%d) flags= %u state= %ld\n", current->pid, tmp_ts->flags, tmp_ts->state);
-//    if(!tmp_ts) {
-//	pr_alert("ABORT!\n");
-//	return 0;
-//    }
-//    if(list_empty(&tmp_ts->parent->children)) {
-//        pr_alert("pre-DFS: CURRENT(%d) tmp_ts->parent->children empty children list, return 0", current->pid);
-//        return 0;
-//    }
-    if(down_trylock(&sem)==0) {
-        //pr_alert("pre-DFS: got the semaphore, entering DFS()\n");
-        total_rss=DFS(tmp_ts->parent);
-    }
-    else {
-        //pr_alert("pre-DFS: failed to get the semaphore, aborting\n");
-	return 0;
-    }
-//    if(total_rss==0) {
-//	pr_alert("total_rss==0!!! ABORT\n");
-//	return 0;
-//    }
-    //pr_alert("DFS-RESULT: CURRENT(%d) total_rss = %lu\n", current->pid, total_rss);
-
-    // if more then that is taken by the PC, don't kill anything, resume operations...
-    pc_pages=100*total_rss/memcg->memory.parent->limit;
-    pr_debug("pc_pages = %ld\n", pc_pages);
-    if(pc_pages < 100-bail_mark_percent) {
-        //pr_alert("Still not under too much pressure, resuming...\n");
-        up(&sem);
-        return 0;
-    }
-
-    //pr_alert("Under %d %% pagecache left in memcg, abort!\n", bail_mark_percent);
 
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
@@ -216,30 +117,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // Now we terminate the task (current)...
     // OR... terminate 1st descendant of slurmstepd (tmp_ts) and by that terminate the job itself
     // OR BOTH!?
-    // force_sig(9, current);
-    // send_sig(9, current, 0);
     //
     // pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-    pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s parent.comm=%s uid=%d\n", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val);
-    //send_sig(9, tmp_ts, 0);
-    //send_sig(9, current, 0);
-    //kill_pid(find_vpid(tmp_ts->pid), 9, 0);
-    rcu_read_lock();
+    pr_alert("KP_OOM: Call send_sig(SIGKILL) on pid=%d comm=%s parent.comm=%s uid=%d\n, current.pid=%d current.comm=%s", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val, current->pid, current->comm);
     kill_pid(find_vpid(tmp_ts->pid), 9, 0);
-    //kill_pid(find_vpid(current->pid), 9, 0);
-    pr_alert("post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
-    //mdelay(2000);
-    // arm timer and release the lock there
-    init_timer(&sem_timer);
-    // now + 20k miliseconds
-    sem_timer.data=0;
-    sem_timer.function=timer_function_up_semaphore;
-    sem_timer.expires=jiffies+msecs_to_jiffies(10000);
-    add_timer(&sem_timer);
-    //setup_timer(sem_timer, timer_function_up_semaphore, 100);
-    //up(&sem);
-    rcu_read_unlock();
-    pr_alert("...call finished\n");
+    pr_alert("KP_OOM: post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
+
+    pr_alert("KP_OOM: ...call finished\n");
     return 0;
 }
 
@@ -259,10 +143,8 @@ int dummy_init(void)
 {
         unsigned long symbol_address;
 
-	sema_init(&sem, 1);
         pr_alert("kp_oom init\n");
         pr_alert("kp_oom init of kprobe\n");
-        pr_alert("kp_oom bail_mark_percent=%d\n", bail_mark_percent);
         kp.pre_handler=kp_pre;
         kp.post_handler=kp_post;
         kp.fault_handler=kp_fault;
