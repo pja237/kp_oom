@@ -78,6 +78,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
 
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
+    // Q: since right after us the 'real' oom will happen, do we even need to send the notification anymore? ...think...
     // --------------------------------------------------------------------------------
     pr_debug("tmp_ts->parent pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
     // ok, we're here, lets try to send an event
