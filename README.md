@@ -10,7 +10,7 @@ An unorthodox approach (poc) of working around the following issue:
 
 The idea is to try and outrace the situation observed [here](https://github.com/hpcng/singularity/issues/5850) by preemptively terminating the slurm-singularity job which is about to reach the memory limit and trigger the stalling situation described in the issue above.
 
-This is a kernel module which attaches a kprobe to `try_to_free_mem_cgroup_pages` function.
+This is a kernel module which attaches a kprobe to `mem_cgroup_oom_synchronize` function.
 
 Upon triggering, in pre_handler , we check some preconditions the triggering process must meet:
 

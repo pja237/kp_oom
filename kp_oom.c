@@ -1,11 +1,21 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kprobes.h>
 #include <linux/fdtable.h>
 #include <linux/rcupdate.h>
 #include <linux/eventfd.h>
+#include <linux/cgroup.h>
+#include <linux/res_counter.h>
+#include <linux/vmpressure.h>
+#include <linux/memcontrol.h>
+#include <linux/page_counter.h>
+#include <linux/delay.h>
+#include <linux/timer.h>
+#include "kp_oom.h"
 
-#define KALLSYM "try_to_free_mem_cgroup_pages"
+//#define KALLSYM "try_to_free_mem_cgroup_pages"
+#define KALLSYM "mem_cgroup_oom_synchronize"
 #define SLURM "slurmstepd"
 #define SINGULARITY "starter-suid"
 
@@ -28,16 +38,23 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     uint64_t plus_one = 1;
     // --------------------------------------------------------------------------------
 
+    // pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
-    pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
         pr_debug(" Exiting slurmstepd, ignore.\n");
         return 0;
     }
 
+    // else do work...
+    //
     // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
     tmp_ts=current;
-    while(tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
+    if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
+        pr_alert("parent killed!!!\n");
+        return 0;
+    }
+    while(tmp_ts->parent!=tmp_ts && tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
         pr_debug("WALK UP tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
         pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
         if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
@@ -49,7 +66,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         count_sing++;
     }
     pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
-    if(tmp_ts->pid == 1 || count_sing == 0) {
+    if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0) {
         // we have walked all the way up to the top, so we didn't come from slurm => abort!
         // OR we haven't encountered singularity starter-suid above us, also abort!
         pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
@@ -61,6 +78,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
 
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
+    // Q: since right after us the 'real' oom will happen, do we even need to send the notification anymore? ...think...
     // --------------------------------------------------------------------------------
     pr_debug("tmp_ts->parent pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
     // ok, we're here, lets try to send an event
@@ -100,13 +118,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // Now we terminate the task (current)...
     // OR... terminate 1st descendant of slurmstepd (tmp_ts) and by that terminate the job itself
     // OR BOTH!?
-    // force_sig(9, current);
-    // send_sig(9, current, 0);
     //
     // pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-    pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s job=%s uid=%d\n", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val);
-    send_sig(9, tmp_ts, 0);
-    pr_alert("...call finished\n");
+    pr_alert("KP_OOM: Call send_sig(SIGKILL) on pid=%d comm=%s parent.comm=%s uid=%d\n, current.pid=%d current.comm=%s", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val, current->pid, current->comm);
+    kill_pid(find_vpid(tmp_ts->pid), 9, 0);
+    pr_alert("KP_OOM: post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
+
+    pr_alert("KP_OOM: ...call finished\n");
     return 0;
 }
 
