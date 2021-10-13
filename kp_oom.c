@@ -14,10 +14,10 @@
 #include <linux/timer.h>
 #include "kp_oom.h"
 
-//#define KALLSYM "try_to_free_mem_cgroup_pages"
 #define KALLSYM "mem_cgroup_oom_synchronize"
 #define SLURM "slurmstepd"
 #define SINGULARITY "starter-suid"
+#define TMUX "tmux"
 
 MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
@@ -28,7 +28,14 @@ static struct kprobe kp;
 int kp_pre(struct kprobe *k, struct pt_regs *r)
 {
     int count_sing = 0;
+    int count_tmux = 0;
+    int count_slurm = 0;
+
+    pid_t pid_tmux;
+    pid_t pid_sing;
+
     struct task_struct *tmp_ts;
+    struct task_struct *slurm_ts;
     const struct cred *cred = current_cred();
     // --------------------------------------------------------------------------------
     // eventfd vars
@@ -46,32 +53,64 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         return 0;
     }
 
-    // else do work...
-    //
-    // if this is called from somewhere that is not a descendant of slurmstepd, also abort!
-    tmp_ts=current;
-    if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
-        pr_alert("parent killed!!!\n");
+    // we're in interactive tmux, suicide!
+    if(strncmp(current->comm, TMUX, sizeof(TMUX)) == 0) {
+        pr_alert("TMUX-OOM DETECTED, self-kill.\n");
+        kill_pid(find_vpid(current->pid), 9, 0);
         return 0;
     }
-    while(tmp_ts->parent!=tmp_ts && tmp_ts->pid != 1 && strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) != 0) {
-        pr_debug("WALK UP tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-        pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
-        if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
+
+    // else do work...
+    //
+    tmp_ts=current;
+    pr_debug("WALK START tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+    if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
+        pr_alert("Something wrong with the parent task! Aborting!\n");
+        return 0;
+    }
+
+    // traverse all the way to pid 1 and note if there is slurm, tmux and singularity in the path
+    while(tmp_ts->parent!=tmp_ts && tmp_ts->parent!=NULL && tmp_ts->pid != 1) {
+        pr_debug("WALK CURRENT TASK tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+        //pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
+        if(strncmp(tmp_ts->comm, TMUX, sizeof(TMUX)) == 0) {
+            count_tmux++;
+            pid_tmux=tmp_ts->pid;
+        }
+        else if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
             count_sing++;
+            pid_sing=tmp_ts->pid;
+        }
+        else if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+            count_slurm++;
+            slurm_ts=tmp_ts;
         }
         tmp_ts=tmp_ts->parent;
     }
-    if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
-        count_sing++;
-    }
+
     pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
-    if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0) {
-        // we have walked all the way up to the top, so we didn't come from slurm => abort!
-        // OR we haven't encountered singularity starter-suid above us, also abort!
-        pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
+    if(!(count_sing!=0 && (count_slurm!=0 || count_tmux!=0))) {
+        pr_debug("WALK TOP shows we're no descendant of ( singularity AND (slurmstepd OR tmux) ), abort!\n");
         return 0;
     }
+    else {
+        pr_debug("Qualified for shootout!\n");
+    }
+
+    // srun --pty tmux -> singularity case, no way to find eventfd, so we just shoot what we can...tmux
+    if(count_tmux!=0 && count_slurm==0) {
+        pr_alert("KP_OOM: special case, interactive tmux, shooting tmux %d %s\n", tmp_ts->pid, tmp_ts->comm);
+        kill_pid(find_vpid(pid_tmux), 9, 0);
+        return 0;
+    }
+ 
+
+    //if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0 || count_tmux == 0 ) {
+    //    // we have walked all the way up to the top, so we didn't come from slurm => abort!
+    //    // OR we haven't encountered singularity starter-suid above us, also abort!
+    //    pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
+    //    return 0;
+    //}
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
     // ...we could try to terminate that one
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
@@ -80,7 +119,8 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
     // Q: since right after us the 'real' oom will happen, do we even need to send the notification anymore? ...think...
     // --------------------------------------------------------------------------------
-    pr_debug("tmp_ts->parent pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
+    tmp_ts=slurm_ts;
+    pr_debug("SLURMSTEPD CHECK tmp_ts->parent->pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
     // ok, we're here, lets try to send an event
     rcu_read_lock();
     // slurm efd = 12 for .batch and .extern (those don't have fd up to 17)
@@ -122,15 +162,13 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // pr_alert("Call send_sig(SIGKILL) on pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
     pr_alert("KP_OOM: Call send_sig(SIGKILL) on pid=%d comm=%s parent.comm=%s uid=%d\n, current.pid=%d current.comm=%s", tmp_ts->pid, tmp_ts->comm, tmp_ts->parent->comm, cred->uid.val, current->pid, current->comm);
     kill_pid(find_vpid(tmp_ts->pid), 9, 0);
-    pr_alert("KP_OOM: post-kill_pid: %d flags= %u state= %ld\n", current->pid, current->flags, current->state);
 
-    pr_alert("KP_OOM: ...call finished\n");
     return 0;
 }
 
 void kp_post(struct kprobe *k, struct pt_regs *r, unsigned long flags)
 {
-    pr_debug("kprobe post-FIRE on %s!\n", KALLSYM);
+    // pr_debug("kprobe post-FIRE on %s!\n", KALLSYM);
     return;
 }
 
