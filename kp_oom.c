@@ -81,14 +81,14 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
             count_sing++;
             pid_sing=tmp_ts->pid;
         }
-        else if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+        if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
             count_slurm++;
             slurm_ts=tmp_ts;
         }
         tmp_ts=tmp_ts->parent;
     }
 
-    pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
+    pr_debug("WALK TOP pid=%d comm=%s count_sing=%d count_slurm=%d count_tmux=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing, count_slurm, count_tmux);
     if(!(count_sing!=0 && (count_slurm!=0 || count_tmux!=0))) {
         pr_debug("WALK TOP shows we're no descendant of ( singularity AND (slurmstepd OR tmux) ), abort!\n");
         return 0;
