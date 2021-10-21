@@ -35,7 +35,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     pid_t pid_sing;
 
     struct task_struct *tmp_ts;
-    struct task_struct *slurm_ts;
+    struct task_struct *slurm_ts = NULL;
     const struct cred *cred = current_cred();
     // --------------------------------------------------------------------------------
     // eventfd vars
@@ -45,56 +45,106 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     uint64_t plus_one = 1;
     // --------------------------------------------------------------------------------
 
-    // pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
+    pr_debug("KPROBE PRE - FIRE on pid=%d!\n", current->pid);
+
 
     // if we're an exiting slurmstepd, don't do anything.... abort this path!
     if(strncmp(current->comm, SLURM, sizeof(SLURM)) == 0) {
-        pr_debug(" Exiting slurmstepd, ignore.\n");
+        pr_debug("Exiting slurmstepd, ignore.\n");
         return 0;
     }
 
     // we're in interactive tmux, suicide!
     if(strncmp(current->comm, TMUX, sizeof(TMUX)) == 0) {
-        pr_alert("TMUX-OOM DETECTED, self-kill.\n");
+        pr_alert("kp_oom: tmux oom detected, SIGKILL self (%d)\n", current->pid);
         kill_pid(find_vpid(current->pid), 9, 0);
         return 0;
     }
 
-    // else do work...
-    //
+    pr_debug("----------------------------------------\n");
     tmp_ts=current;
-    pr_debug("WALK START tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-    if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
-        pr_alert("Something wrong with the parent task! Aborting!\n");
-        return 0;
-    }
-
-    // traverse all the way to pid 1 and note if there is slurm, tmux and singularity in the path
-    while(tmp_ts->parent!=tmp_ts && tmp_ts->parent!=NULL && tmp_ts->pid != 1) {
-        pr_debug("WALK CURRENT TASK tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
-        //pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
-        if(strncmp(tmp_ts->comm, TMUX, sizeof(TMUX)) == 0) {
-            count_tmux++;
-            pid_tmux=tmp_ts->pid;
+    while(tmp_ts->parent!=tmp_ts && tmp_ts->parent!=NULL && tmp_ts->pid != 1 ) {
+        struct vm_area_struct *tmp_vma = NULL;
+        if(tmp_ts->mm != NULL && tmp_ts->mm->mmap != NULL) {
+            tmp_vma = tmp_ts->mm->mmap;
         }
-        else if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
-            count_sing++;
-            pid_sing=tmp_ts->pid;
+        else {
+            break;
         }
-        else if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+        // traverse the process VMA structures, check if they have singularity or tmux mapped, if yes, take note and break traversal
+        rcu_read_lock();
+        while(tmp_vma != NULL) {
+            unsigned char *name;
+            if(tmp_vma->vm_file != NULL) {
+                name=tmp_vma->vm_file->f_path.dentry->d_name.name;
+                pr_debug("kp_oom: vma_search found %d has %s file mapped\n", tmp_ts->pid, name);
+                // here do filename checks and break
+                if(strncmp(name, SINGULARITY, sizeof(SINGULARITY)) == 0) {
+                    pr_debug("kp_oom: vma_search: singularity FOUND!\n");
+                    count_sing++;
+                    pid_sing=tmp_ts->pid;
+                    break;
+                } else if(strncmp(name, TMUX, sizeof(TMUX)) == 0) {
+                    pr_debug("kp_oom: vma_search: tmux FOUND!\n");
+                    count_tmux++;
+                    pid_tmux=tmp_ts->pid;
+                    break;
+                }
+                // eohere
+            }
+            tmp_vma=tmp_vma->vm_next;
+        }
+        rcu_read_unlock();
+        // if the process parent is slurmstepd, take note and also break traversal, no need to go to pid 1
+        if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+            pr_debug("kp_oom: vma_search: slurmstepd parent FOUND!\n");
             count_slurm++;
             slurm_ts=tmp_ts;
+            break;
         }
         tmp_ts=tmp_ts->parent;
+        pr_debug("----------------------------------------\n");
     }
 
-    pr_debug("WALK TOP pid=%d comm=%s count_sing=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing);
+
+    // else do work...
+    //
+    // Not needed anymore... if ever was.
+    //
+    // tmp_ts=current;
+    // pr_debug("WALK START tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+    // if(tmp_ts->parent==NULL || tmp_ts->parent==tmp_ts) {
+    //     pr_alert("Something wrong with the parent task! Aborting!\n");
+    //     return 0;
+    // }
+
+    // traverse all the way to pid 1 and note if there is slurm, tmux and singularity in the path
+    //
+    //while(tmp_ts->parent!=tmp_ts && tmp_ts->parent!=NULL && tmp_ts->pid != 1) {
+    //    pr_debug("WALK CURRENT TASK tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+    //    //pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
+    //    if(strncmp(tmp_ts->comm, TMUX, sizeof(TMUX)) == 0) {
+    //        count_tmux++;
+    //        pid_tmux=tmp_ts->pid;
+    //    }
+    //    else if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
+    //        count_sing++;
+    //        pid_sing=tmp_ts->pid;
+    //    }
+    //    else if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+    //        count_slurm++;
+    //        slurm_ts=tmp_ts;
+    //    }
+    //    tmp_ts=tmp_ts->parent;
+    //}
+
+    pr_debug("VMA_SEARCH RESULTS for pid=%d comm=%s count_sing=%d count_slurm=%d count_tmux=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing, count_slurm, count_tmux);
     if(!(count_sing!=0 && (count_slurm!=0 || count_tmux!=0))) {
-        pr_debug("WALK TOP shows we're no descendant of ( singularity AND (slurmstepd OR tmux) ), abort!\n");
+        pr_debug("VMA_SEARCH shows we're no descendant of ( singularity AND (slurmstepd OR tmux) ), abort!\n");
         return 0;
     }
     else {
-        pr_debug("Qualified for shootout!\n");
+        pr_debug("Qualified for termination!\n");
     }
 
     // srun --pty tmux -> singularity case, no way to find eventfd, so we just shoot what we can...tmux
@@ -119,6 +169,12 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
     // Q: since right after us the 'real' oom will happen, do we even need to send the notification anymore? ...think...
     // --------------------------------------------------------------------------------
+    //
+    // Sanity check:
+    if(slurm_ts == NULL) {
+        pr_alert("KP_OOM BLUNDER, slurm_ts == NULL when it shouldn't, aborting\n");
+        return 0;
+    }
     tmp_ts=slurm_ts;
     pr_debug("SLURMSTEPD CHECK tmp_ts->parent->pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
     // ok, we're here, lets try to send an event
