@@ -18,10 +18,12 @@
 #define SLURM "slurmstepd"
 #define SINGULARITY "starter-suid"
 #define TMUX "tmux"
+#define SSHD "sshd"
 
 MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
 MODULE_LICENSE("GPL");
+MODULE_VERSION("1.0");
 
 static struct kprobe kp;
 
@@ -30,9 +32,11 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     int count_sing = 0;
     int count_tmux = 0;
     int count_slurm = 0;
+    int count_sshd = 0;
 
     pid_t pid_tmux;
     pid_t pid_sing;
+    pid_t pid_sshd;
 
     struct task_struct *tmp_ts;
     struct task_struct *slurm_ts;
@@ -55,7 +59,7 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
 
     // we're in interactive tmux, suicide!
     if(strncmp(current->comm, TMUX, sizeof(TMUX)) == 0) {
-        pr_alert("TMUX-OOM DETECTED, self-kill.\n");
+        pr_alert("TMUX-OOM DETECTED for pid %d uid %d, self-kill.\n", current->pid, cred->uid.val);
         kill_pid(find_vpid(current->pid), 9, 0);
         return 0;
     }
@@ -74,14 +78,23 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         pr_debug("WALK CURRENT TASK tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
         //pr_debug("WALK ABOVE tmp_ts->parent->pid=%d parent->comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
         if(strncmp(tmp_ts->comm, TMUX, sizeof(TMUX)) == 0) {
+            pr_debug("WALK match tmux ! tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
             count_tmux++;
             pid_tmux=tmp_ts->pid;
         }
         else if(strncmp(tmp_ts->comm, SINGULARITY, sizeof(SINGULARITY)) == 0) {
+            pr_debug("WALK match singularity ! tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
             count_sing++;
             pid_sing=tmp_ts->pid;
         }
+        else if(strncmp(tmp_ts->comm, SSHD, sizeof(SSHD)) == 0) {
+            pr_debug("WALK match sshd ! tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
+            count_sshd++;
+            pid_sshd=tmp_ts->pid;
+            break;
+        }
         if(strncmp(tmp_ts->parent->comm, SLURM, sizeof(SLURM)) == 0) {
+            pr_debug("WALK match parent slurm ! tmp_ts pid=%d comm=%s\n", tmp_ts->pid, tmp_ts->comm);
             count_slurm++;
             slurm_ts=tmp_ts;
         }
@@ -89,8 +102,8 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     }
 
     pr_debug("WALK TOP pid=%d comm=%s count_sing=%d count_slurm=%d count_tmux=%d\n", tmp_ts->pid, tmp_ts->comm, count_sing, count_slurm, count_tmux);
-    if(!(count_sing!=0 && (count_slurm!=0 || count_tmux!=0))) {
-        pr_debug("WALK TOP shows we're no descendant of ( singularity AND (slurmstepd OR tmux) ), abort!\n");
+    if(!(count_sing!=0 && (count_slurm!=0 || count_tmux!=0 || count_sshd))) {
+        pr_debug("WALK TOP shows we're no descendant of ( singularity AND (slurmstepd OR tmux OR sshd) ), abort!\n");
         return 0;
     }
     else {
@@ -99,11 +112,17 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
 
     // srun --pty tmux -> singularity case, no way to find eventfd, so we just shoot what we can...tmux
     if(count_tmux!=0 && count_slurm==0) {
-        pr_alert("KP_OOM: special case, interactive tmux, shooting tmux %d %s\n", tmp_ts->pid, tmp_ts->comm);
+        pr_alert("KP_OOM: special case, interactive tmux, shooting tmux pid %d from uid=%d called by pid=%d comm=%s\n", pid_tmux, cred->uid.val, current->pid, current->comm);
         kill_pid(find_vpid(pid_tmux), 9, 0);
         return 0;
     }
  
+    // sbatch + ssh into allocation to run singularity, no way to find eventfd, so we just shoot what we can...sshd
+    if(count_sshd!=0 && count_slurm==0) {
+        pr_alert("KP_OOM: special case, ssh into allocation, shooting sshd pid %d from uid=%d called by pid=%d comm=%s\n", pid_sshd, cred->uid.val, current->pid, current->comm);
+        kill_pid(find_vpid(pid_sshd), 9, 0);
+        return 0;
+    }
 
     //if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0 || count_tmux == 0 ) {
     //    // we have walked all the way up to the top, so we didn't come from slurm => abort!
