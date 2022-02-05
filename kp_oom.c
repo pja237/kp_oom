@@ -23,7 +23,7 @@
 MODULE_DESCRIPTION("kprobes kernel module");
 MODULE_AUTHOR("pj");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.1");
 
 static struct kprobe kp;
 
@@ -44,9 +44,9 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // --------------------------------------------------------------------------------
     // eventfd vars
     // --------------------------------------------------------------------------------
-    struct file * efd_file = NULL;          //...to eventfd's file struct
-    struct eventfd_ctx * efd_ctx = NULL;        //...and finally to eventfd context
-    uint64_t plus_one = 1;
+//    struct file * efd_file = NULL;          //...to eventfd's file struct
+//    struct eventfd_ctx * efd_ctx = NULL;        //...and finally to eventfd context
+//    uint64_t plus_one = 1;
     // --------------------------------------------------------------------------------
 
     // pr_debug("KPROBE PRE-FIRE on %s from pid=%d!\n", KALLSYM, current->pid);
@@ -124,12 +124,9 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
         return 0;
     }
 
-    //if(tmp_ts->parent==tmp_ts || tmp_ts->pid == 1 || count_sing == 0 || count_tmux == 0 ) {
-    //    // we have walked all the way up to the top, so we didn't come from slurm => abort!
-    //    // OR we haven't encountered singularity starter-suid above us, also abort!
-    //    pr_debug("WALK TOP shows we're no descendant of slurmstepd or singularity, abort!\n");
-    //    return 0;
-    //}
+    tmp_ts=slurm_ts;
+    pr_debug("SLURMSTEPD CHECK tmp_ts->parent->pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
+
     // here tmp_ts is pointing to the 1st descendant of slurmstepd, meaning... 
     // ...we could try to terminate that one
     // ...also tmp_ts->parent is pointing to slurmstepd which we need for eventfd below! Excellent!
@@ -137,39 +134,41 @@ int kp_pre(struct kprobe *k, struct pt_regs *r)
     // --------------------------------------------------------------------------------
     // This eventfd snippet comes from https://stackoverflow.com/questions/13607730/writing-to-eventfd-from-kernel-module
     // Q: since right after us the 'real' oom will happen, do we even need to send the notification anymore? ...think...
+    // A: 20220105: (Nicholas @nlvw reported) eventfd_signal() can trigger kernel panics, verified, reproducible.
+    //    Removed this whole code block, since:
+    //    1. can panic :)
+    //    2. was questionable if it's necessary to exist at all, since real oom will happen right after us anyways, and properly send notification to slurmstepd
     // --------------------------------------------------------------------------------
-    tmp_ts=slurm_ts;
-    pr_debug("SLURMSTEPD CHECK tmp_ts->parent->pid=%d comm=%s\n", tmp_ts->parent->pid, tmp_ts->parent->comm);
-    // ok, we're here, lets try to send an event
-    rcu_read_lock();
-    // slurm efd = 12 for .batch and .extern (those don't have fd up to 17)
-    //           = 17 for .0
-    efd_file = fcheck_files(tmp_ts->parent->files, 17);
-    if(efd_file == NULL) {
-        pr_debug("edf fd 17 failed, we're in .batch or .extern, trying for 12\n");
-        efd_file = fcheck_files(tmp_ts->parent->files, 12);
-        if(efd_file != NULL) {
-            pr_debug("edf fd 12 success!\n");
-        }
-        else {
-            pr_alert("Could not find eventfd file, aborting!\n");
-            return 0;
-        }
-    }
-    rcu_read_unlock();
-    efd_ctx = eventfd_ctx_fileget(efd_file);
-    if (!efd_ctx) {
-        pr_debug("eventfd_ctx_fileget() FAILED\n");
-        // uh-oh.... dragons ahead!?!
-        return -1;
-    }
-    pr_debug("Resolved pointer to the userspace program's eventfd's context: %p \n", efd_ctx);
-
-    eventfd_signal(efd_ctx, plus_one);
-
-    pr_debug("Incremented userspace program's eventfd's counter by 1\n");
-
-    eventfd_ctx_put(efd_ctx);
+//    // ok, we're here, lets try to send an event
+//    rcu_read_lock();
+//    // slurm efd = 12 for .batch and .extern (those don't have fd up to 17)
+//    //           = 17 for .0
+//    efd_file = fcheck_files(tmp_ts->parent->files, 17);
+//    if(efd_file == NULL) {
+//        pr_debug("edf fd 17 failed, we're in .batch or .extern, trying for 12\n");
+//        efd_file = fcheck_files(tmp_ts->parent->files, 12);
+//        if(efd_file != NULL) {
+//            pr_debug("edf fd 12 success!\n");
+//        }
+//        else {
+//            pr_alert("Could not find eventfd file, aborting!\n");
+//            return 0;
+//        }
+//    }
+//    rcu_read_unlock();
+//    efd_ctx = eventfd_ctx_fileget(efd_file);
+//    if (!efd_ctx) {
+//        pr_debug("eventfd_ctx_fileget() FAILED\n");
+//        // uh-oh.... dragons ahead!?!
+//        return -1;
+//    }
+//    pr_debug("Resolved pointer to the userspace program's eventfd's context: %p \n", efd_ctx);
+//
+//    eventfd_signal(efd_ctx, plus_one);
+//
+//    pr_debug("Incremented userspace program's eventfd's counter by 1\n");
+//
+//    eventfd_ctx_put(efd_ctx);
     // --------------------------------------------------------------------------------
     // EOSTEAL
     // --------------------------------------------------------------------------------
@@ -201,7 +200,7 @@ int dummy_init(void)
 {
         unsigned long symbol_address;
 
-        pr_alert("kp_oom init\n");
+        pr_alert("kp_oom init %s-%s\n", THIS_MODULE->name, THIS_MODULE->version );
         pr_alert("kp_oom init of kprobe\n");
         kp.pre_handler=kp_pre;
         kp.post_handler=kp_post;
